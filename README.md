@@ -1,0 +1,2 @@
+# lrcup
+LRCLIB Lyrics Uploader
