@@ -2,6 +2,8 @@ use reqwest::Client;
 use serde::Deserialize;
 use data_encoding::HEXUPPER;
 use ring::digest::{Context, SHA256};
+use std::thread;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 #[derive(Deserialize, Debug)]
 pub struct ChallengeResponse {
@@ -37,23 +39,38 @@ fn verify_nonce(result: &Vec<u8>, target: &Vec<u8>) -> bool {
 }
 
 pub fn solve_challenge(prefix: &str, target_hex: &str) -> String {
-    let mut nonce = 0;
-    let mut hashed;
+    let num_threads = num_cpus::get();
     let target = HEXUPPER.decode(target_hex.as_bytes()).unwrap();
+    let found = Arc::new(AtomicBool::new(false));
+    let result = Arc::new(parking_lot::Mutex::new(None));
+    let prefix = prefix.to_string();
+    let target = Arc::new(target);
 
-    loop {
-        let mut context = Context::new(&SHA256);
-        let input = format!("{}:{}", prefix, nonce);
-        context.update(input.as_bytes());
-        hashed = context.finish().as_ref().to_vec();
-
-        let result = verify_nonce(&hashed, &target);
-        if result {
-            break;
-        } else {
-            nonce += 1;
+    crossbeam_utils::thread::scope(|s| {
+        for thread_id in 0..num_threads {
+            let prefix = prefix.clone();
+            let target = Arc::clone(&target);
+            let found = Arc::clone(&found);
+            let result = Arc::clone(&result);
+            s.spawn(move |_| {
+                let mut nonce = thread_id as u64;
+                while !found.load(Ordering::Relaxed) {
+                    let mut context = Context::new(&SHA256);
+                    let input = format!("{}:{}", prefix, nonce);
+                    context.update(input.as_bytes());
+                    let hashed = context.finish().as_ref().to_vec();
+                    if verify_nonce(&hashed, &target) {
+                        let mut res = result.lock();
+                        *res = Some(nonce);
+                        found.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                    nonce += num_threads as u64;
+                }
+            });
         }
-    }
+    }).unwrap();
 
-    nonce.to_string()
+    let res = result.lock();
+    res.unwrap().to_string()
 }
